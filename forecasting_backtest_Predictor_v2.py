@@ -1,16 +1,56 @@
 import os
+import sys
 import pandas as pd
 import numpy as np
 import random
+import argparse
+import json
 from scipy.stats import norm
 from matplotlib.animation import FuncAnimation
 import matplotlib.pyplot as plt
 from matplotlib.animation import FFMpegWriter
+from pathlib import Path
+
+# === Fix Windows encoding issues ===
+# Set UTF-8 encoding for stdout/stderr to handle emoji characters
+if sys.platform == 'win32':
+    try:
+        # Python 3.7+
+        sys.stdout.reconfigure(encoding='utf-8')
+        sys.stderr.reconfigure(encoding='utf-8')
+    except (AttributeError, ValueError):
+        # Fallback for older Python versions
+        import codecs
+        sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer, 'strict')
+        sys.stderr = codecs.getwriter('utf-8')(sys.stderr.buffer, 'strict')
+
+# === Parse Command Line Arguments ===
+parser = argparse.ArgumentParser(description='Run backtest on stock forecast predictions')
+parser.add_argument('--forecast-dir', type=str, default='forecasts',
+                    help='Directory containing forecast CSV files (default: forecasts)')
+parser.add_argument('--model-name', type=str, default='',
+                    help='Model name identifier for output files (e.g., old_model, new_model)')
+parser.add_argument('--video-dir', type=str, default='videos',
+                    help='Directory to save output videos (default: videos)')
+parser.add_argument('--output-dir', type=str, default='backtest_results',
+                    help='Directory to save metrics JSON/CSV (default: backtest_results)')
+args = parser.parse_args()
 
 # === CONFIG ===
-video_dir = "videos"
-forecast_dir = "forecasts"
+video_dir = args.video_dir
+forecast_dir = args.forecast_dir
+model_name = args.model_name
+output_dir = args.output_dir
+
+# Create output directories
 os.makedirs(video_dir, exist_ok=True)
+os.makedirs(output_dir, exist_ok=True)
+
+# Add model name suffix to filenames if provided
+if model_name:
+    model_suffix = f"_{model_name}"
+else:
+    model_suffix = ""
 
 # Parameters
 initial_value = 1.0
@@ -51,11 +91,11 @@ for filename in os.listdir(forecast_dir):
 
 # === Report rejected tickers ===
 if rejected_tickers:
-    print("\n⚠️ Rejected tickers due to unrealistic spikes (>50% daily change):")
+    print("\n[WARNING] Rejected tickers due to unrealistic spikes (>50% daily change):")
     for t, m in rejected_tickers:
         print(f"  - {t}: max daily change = {m:.2%}")
 else:
-    print("\n✅ No stocks rejected for excessive daily change.")
+    print("\n[OK] No stocks rejected for excessive daily change.")
 
 # === Common Dates ===
 if not all_forecasts:
@@ -163,9 +203,10 @@ for date in common_dates:
 # === Report Buy Success Rate ===
 if total_buys > 0:
     success_fraction = successful_buys / total_buys
-    print(f"\n📈 Buy success rate: {successful_buys}/{total_buys} = {success_fraction:.2%}")
+    print(f"\n[STATS] Buy success rate: {successful_buys}/{total_buys} = {success_fraction:.2%}")
 else:
-    print("\n⚠️ No completed trades to evaluate.")
+    print("\n[WARNING] No completed trades to evaluate.")
+    success_fraction = 0.0
 
 
 # === Random Baseline ===
@@ -197,6 +238,77 @@ spy_df = pd.read_csv(spy_path, parse_dates=["date"])
 spy_df = spy_df.rename(columns={"date": "Date", "close": "Close"})
 spy_df = spy_df[spy_df["Date"].isin(common_dates)].sort_values("Date").reset_index(drop=True)
 spy_df["PortfolioValue"] = initial_value * (spy_df["Close"] / spy_df["Close"].iloc[0])
+
+# === Calculate Additional Metrics ===
+def calculate_sharpe_ratio(returns, risk_free_rate=0.0):
+    """Calculate annualized Sharpe ratio from returns."""
+    if len(returns) == 0 or np.std(returns) == 0:
+        return 0.0
+    excess_returns = returns - risk_free_rate / 252  # Daily risk-free rate
+    return np.sqrt(252) * np.mean(excess_returns) / np.std(returns)
+
+def calculate_max_drawdown(values):
+    """Calculate maximum drawdown from portfolio values."""
+    if len(values) == 0:
+        return 0.0
+    cumulative = np.array(values)
+    running_max = np.maximum.accumulate(cumulative)
+    drawdown = (cumulative - running_max) / running_max
+    return np.min(drawdown)
+
+# Calculate returns from strategy history
+strategy_returns = []
+for i in range(1, len(strategy_history)):
+    if strategy_history[i-1] > 0:
+        ret = (strategy_history[i] - strategy_history[i-1]) / strategy_history[i-1]
+        strategy_returns.append(ret)
+
+final_value = strategy_history[-1] if strategy_history else initial_value
+total_return = (final_value - initial_value) / initial_value
+sharpe = calculate_sharpe_ratio(np.array(strategy_returns)) if strategy_returns else 0.0
+max_drawdown = calculate_max_drawdown(strategy_history)
+win_rate = success_fraction if total_buys > 0 else 0.0
+
+# SPY metrics for comparison
+spy_final = spy_df["PortfolioValue"].values[-1] if len(spy_df) > 0 else initial_value
+spy_total_return = (spy_final - initial_value) / initial_value
+
+print(f"\n[STRATEGY METRICS]")
+print(f"   Final Value: {final_value:.4f}")
+print(f"   Total Return: {total_return:.2%}")
+print(f"   Sharpe Ratio: {sharpe:.4f}")
+print(f"   Max Drawdown: {max_drawdown:.2%}")
+print(f"   Win Rate: {win_rate:.2%}")
+print(f"   Total Trades: {total_buys}")
+print(f"\n[SPY BUY & HOLD]")
+print(f"   Final Value: {spy_final:.4f}")
+print(f"   Total Return: {spy_total_return:.2%}")
+
+# === Save Metrics to JSON ===
+metrics = {
+    "model_name": model_name if model_name else "default",
+    "forecast_dir": forecast_dir,
+    "initial_value": initial_value,
+    "final_value": float(final_value),
+    "total_return": float(total_return),
+    "sharpe_ratio": float(sharpe),
+    "max_drawdown": float(max_drawdown),
+    "win_rate": float(win_rate),
+    "successful_buys": int(successful_buys),
+    "total_buys": int(total_buys),
+    "total_dates": len(common_dates),
+    "num_stocks": len(all_forecasts),
+    "rejected_tickers": len(rejected_tickers),
+    "spy_final_value": float(spy_final),
+    "spy_total_return": float(spy_total_return),
+    "beats_spy": bool(total_return > spy_total_return),
+    "return_over_spy": float(total_return - spy_total_return)
+}
+
+metrics_file = os.path.join(output_dir, f"metrics{model_suffix}.json")
+with open(metrics_file, 'w') as f:
+    json.dump(metrics, f, indent=2)
+print(f"\n[SAVED] Metrics saved to: {metrics_file}")
 
 # === Animation ===
 def animate_plot(dates, random_results, strat_values, spy_values,
@@ -242,12 +354,12 @@ def animate_plot(dates, random_results, strat_values, spy_values,
     out_path = os.path.join(video_dir, filename)
     writer = FFMpegWriter(fps=60, bitrate=1800)
     anim.save(out_path, writer=writer, dpi=220)
-    print(f"✅ Saved animation: {out_path}")
+    print(f"[SAVED] Animation saved: {out_path}")
     plt.close(fig)
 
 # === Run animations ===
 animate_plot(common_dates, random_results, strategy_history, spy_df["PortfolioValue"].values,
-             show_uncertainty=False, filename="random_vs_strategy_clean.mp4")
+             show_uncertainty=False, filename=f"random_vs_strategy_clean{model_suffix}.mp4")
 
 animate_plot(common_dates, random_results, strategy_history, spy_df["PortfolioValue"].values,
-             random_mean, random_std, show_uncertainty=True, filename="random_vs_strategy_uncertainty.mp4")
+             random_mean, random_std, show_uncertainty=True, filename=f"random_vs_strategy_uncertainty{model_suffix}.mp4")
