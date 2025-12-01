@@ -1,77 +1,56 @@
-from alpha_vantage.timeseries import TimeSeries
+import yfinance as yf
 import pandas as pd
 import os
-import time
-from datetime import datetime
-import json
-def update_or_create_csv(ticker, ts, save_folder, delay_sec=1):
+
+def download_market_data(save_folder="TrainingData/indicators_data/raw/stocksData", period="10y"):
+    """
+    Download market context data (SPY for market, VIX for volatility)
+    """
     if not os.path.exists(save_folder):
         os.makedirs(save_folder)
 
-    filepath = os.path.join(save_folder, f"{ticker}_daily.csv")
+    market_symbols = {
+        'SPY': 'S&P 500 ETF',
+        '^VIX': 'VIX Volatility Index'
+    }
 
-    try:
-        print(f" Downloading full daily data for {ticker}...")
-        new_data, _ = ts.get_daily(symbol=ticker, outputsize='full')
-
-        new_data.reset_index(inplace=True)
-        new_data.rename(columns={
-            'date': 'date',
-            '1. open': 'open',
-            '2. high': 'high',
-            '3. low': 'low',
-            '4. close': 'close',
-            '5. volume': 'volume'
-        }, inplace=True)
-
-        new_data.sort_values('date', inplace=True)
-        new_data.reset_index(drop=True, inplace=True)
-        new_data['date'] = pd.to_datetime(new_data['date'])
-
-        if os.path.exists(filepath):
-            existing_data = pd.read_csv(filepath, parse_dates=['date'])
-            all_data = pd.concat([existing_data, new_data])
-            all_data = all_data.drop_duplicates(subset='date').sort_values('date').reset_index(drop=True)
-            print(f"📝 Updating existing file for {ticker} with new dates...")
-        else:
-            all_data = new_data
-            print(f"📁 Creating new file for {ticker}...")
-
-        all_data.to_csv(filepath, index=False)
-        print(f" Data for {ticker} saved to {filepath}")
-        time.sleep(delay_sec)
-
-    except Exception as e:
-        print(f" Failed to download {ticker}: {e}")
-
-def load_api_key():
-    try:
-        with open("config.json", "r") as f:
-            cfg = json.load(f)
-            key = cfg.get("ALPHA_VANTAGE_KEY")
+    for symbol, name in market_symbols.items():
+        try:
+            print(f"⬇️  Downloading full daily data for {symbol} ({name})...")
             
-            if key is None or key.strip() == "":
-                raise ValueError(
-                    "\nERROR: Your AlphaVantage API key is missing.\n"
-                    "Please open config.json and set:\n"
-                    '{ "ALPHA_VANTAGE_KEY": "YOUR_KEY_HERE" }\n'
-                )
-            return key
+            stock = yf.Ticker(symbol)
+            data = stock.history(period=period)
+            
+            if data.empty:
+                print(f"❌ No data found for {symbol}")
+                continue
+            
+            # Reset index and standardize columns
+            data.reset_index(inplace=True)
+            data.columns = [col.lower() for col in data.columns]
+            
+            # Keep OHLCV data
+            columns_to_keep = ['date', 'open', 'high', 'low', 'close', 'volume']
+            data = data[[col for col in columns_to_keep if col in data.columns]]
+            
+            # Sort and save
+            data.sort_values('date', inplace=True)
+            data.reset_index(drop=True, inplace=True)
+            
+            # Use clean filename (replace ^ with nothing)
+            clean_symbol = symbol.replace('^', '')
+            filepath = os.path.join(save_folder, f"{clean_symbol}_daily.csv")
+            data.to_csv(filepath, index=False)
+            
+            print(f"✅ Saved {symbol} data ({len(data)} rows) to {filepath}\n")
+            
+        except Exception as e:
+            print(f"❌ Failed to download {symbol}: {e}\n")
 
-    except FileNotFoundError:
-        raise FileNotFoundError(
-            "\nERROR: config.json is missing.\n"
-            "Create a config.json file in the project folder with:\n"
-            '{ "ALPHA_VANTAGE_KEY": "YOUR_KEY_HERE" }\n'
-        )
-    
 if __name__ == "__main__":
-    api_key = load_api_key()#""  # Replace with your actual key
-    tickers = ["SPY", "VIXY"]  # S&P 500 and VIX
-    save_folder = "TrainingData/indicators_data/raw/SPY-VIX"
-    delay_seconds = 0.8  # Alpha Vantage free tier = 5 API calls/min
+    print("🌍 Downloading market data...\n")
+    print("=" * 60 + "\n")
+    download_market_data(period="10y")
+    print("✅ Market data download complete!")
 
-    ts = TimeSeries(key=api_key, output_format='pandas')
 
-    for ticker in tickers:
-        update_or_create_csv(ticker, ts, save_folder, delay_seconds)

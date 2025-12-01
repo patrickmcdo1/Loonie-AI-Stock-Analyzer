@@ -1,8 +1,6 @@
 """
 The purpose of this script is to process the raw data found in the indcators_data/raw folder
 and place them in the indicators_data/processed folder.txt
-
-
 """
 
 import os
@@ -15,7 +13,14 @@ PROCESSED_DIR = "TrainingData/indicators_data/processed"
 os.makedirs(PROCESSED_DIR, exist_ok=True)
 
 def process_file(csv_path, output_path):
-    df = pd.read_csv(csv_path, parse_dates=["date"])
+    df = pd.read_csv(csv_path)
+    
+    # Handle different date column naming (yfinance uses 'date', some old files might use 'Date')
+    if 'Date' in df.columns:
+        df = df.rename(columns={'Date': 'date'})
+    
+    # Ensure date is datetime and strip timezone info
+    df['date'] = pd.to_datetime(df['date'], utc=True).dt.tz_localize(None)
     df = df.sort_values("date").reset_index(drop=True)
 
     df["YesterdayClose"] = df["close"].shift(1)
@@ -135,15 +140,12 @@ def process_file(csv_path, output_path):
     #Sentiment change
     df['sentiment_change'] = df['sentiment'] - df['sentiment'].shift(1)
 
-
-
-
     df.dropna(inplace=True)
     df = df.drop(['open', 'high', 'low', 'volume'], axis=1)
 
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     df.to_csv(output_path, index=False)
-    print(f"Processed: {output_path}")
+    print(f"✅ Processed: {output_path}")
 
 def safe_read_insider(insider_path):
     try:
@@ -174,6 +176,7 @@ def safe_read_insider(insider_path):
     except Exception as e:
         print(f"[ERROR] Failed to process {insider_path}: {e}")
         return pd.DataFrame(columns=['date', 'insider_shares', 'insider_amount', 'insider_buy_flag'])
+
 from datetime import datetime
 
 def check_missing_today():
@@ -213,12 +216,18 @@ def main():
         processed_subdir = os.path.join(PROCESSED_DIR, subfolder)
         os.makedirs(processed_subdir, exist_ok=True)
 
+        if not os.path.exists(raw_subdir):
+            print(f"[WARNING] Raw subdirectory not found: {raw_subdir}")
+            continue
+
         for file in os.listdir(raw_subdir):
             if file.endswith(".csv"):
                 raw_file_path = os.path.join(raw_subdir, file)
                 processed_file_path = os.path.join(processed_subdir, f"{os.path.splitext(file)[0]}_processed.csv")
-                process_file(raw_file_path, processed_file_path)
-        
+                try:
+                    process_file(raw_file_path, processed_file_path)
+                except Exception as e:
+                    print(f"❌ Error processing {raw_file_path}: {e}")
 
 if __name__ == "__main__":
     main()

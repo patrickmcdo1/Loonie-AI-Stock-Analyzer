@@ -2,4 +2,9 @@ cache/
 forecasts/
 videos/
 sec-edgar-filings/
+
 config.json
+*.csv
+TrainingData/indicators_data/
+.venv/
+__pycache__/
